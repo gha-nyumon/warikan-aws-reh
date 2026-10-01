@@ -15,7 +15,7 @@ sys.path.insert(0, str(ROOT))
 
 from warikan.calc import split  # noqa: E402
 
-AMOUNTS = [3000, 5000, 8000, 10000, 12000, 15000, 20000, 30000]
+AMOUNTS = [3000, 5000, 8000, 10000, 12000, 15000, 20000, 30000, 40000, 50000]
 PEOPLE = [2, 3, 4, 5, 6, 8, 10]
 OUT_DIR = ROOT / "site"
 
