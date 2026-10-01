@@ -40,3 +40,4 @@ jobs:
     uses: ./.github/workflows/_deploy.yml
     with:
       environment: prod
+      canary: true # 一割だけ新しい版に流し、確かめてから十割にする
