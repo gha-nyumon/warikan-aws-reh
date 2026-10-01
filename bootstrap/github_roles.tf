@@ -10,9 +10,14 @@ locals {
       subs        = ["${local.repo_sub}:ref:refs/heads/main"]
       max_session = 3600
     }
-    # アプリを dev に届ける。main ブランチで動いたジョブだけが借りられる
-    deploy = {
-      subs        = ["${local.repo_sub}:ref:refs/heads/main"]
+    # アプリを dev に届ける。環境 dev を指定したジョブだけが借りられる
+    deploy-dev = {
+      subs        = ["${local.repo_sub}:environment:dev"]
+      max_session = 3600
+    }
+    # アプリを prod に届ける。環境 prod を指定したジョブだけが借りられる（prod は承認してから始まる）
+    deploy-prod = {
+      subs        = ["${local.repo_sub}:environment:prod"]
       max_session = 3600
     }
   }
@@ -72,7 +77,8 @@ locals {
 
   # ロールごとの権限ポリシー（whoami には付けない）
   gha_policies = {
-    deploy = local.deploy_statements["dev"]
+    deploy-dev  = local.deploy_statements["dev"]
+    deploy-prod = local.deploy_statements["prod"]
   }
 }
 
