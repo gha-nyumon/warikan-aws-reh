@@ -5,7 +5,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  id-token: write # OIDC のトークンをもらう
+
   contents: read
 
 jobs:
