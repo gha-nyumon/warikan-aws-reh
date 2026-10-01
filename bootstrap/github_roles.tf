@@ -10,6 +10,69 @@ locals {
       subs        = ["${local.repo_sub}:ref:refs/heads/main"]
       max_session = 3600
     }
+    # アプリを dev に届ける。main ブランチで動いたジョブだけが借りられる
+    deploy = {
+      subs        = ["${local.repo_sub}:ref:refs/heads/main"]
+      max_session = 3600
+    }
+  }
+
+  # infra/ で作るものの名前（infra/ と同じ決まり）
+  function_arn = "arn:aws:lambda:${var.region}:${local.account_id}:function:${var.project}"
+  site_bucket  = "${var.project}-site-${local.account_id}"
+
+  # 1つの環境（エイリアスと、早見表のフォルダ）に届けるための権限
+  deploy_statements = {
+    for env in ["dev", "prod"] : env => [
+      {
+        Sid      = "LambdaCode"
+        Effect   = "Allow"
+        Action   = ["lambda:GetFunction", "lambda:UpdateFunctionCode", "lambda:PublishVersion"]
+        Resource = local.function_arn
+      },
+      {
+        # エイリアスの操作は、関数そのもの（エイリアスの名前の付かない ARN）に対して許可を確かめる仕組みのため、
+        # dev と prod のエイリアスを IAM で分けることはできない（2026-09-30 リハーサルで確認）。環境は S3 のフォルダと信頼ポリシーで分ける
+        Sid      = "LambdaAlias"
+        Effect   = "Allow"
+        Action   = ["lambda:GetAlias", "lambda:UpdateAlias"]
+        Resource = local.function_arn
+      },
+      {
+        # スモークテストで、発行したバージョンを直接呼ぶ
+        Sid      = "LambdaInvokeVersion"
+        Effect   = "Allow"
+        Action   = ["lambda:InvokeFunction"]
+        Resource = "${local.function_arn}:*"
+      },
+      {
+        Sid      = "SiteList"
+        Effect   = "Allow"
+        Action   = ["s3:ListBucket"]
+        Resource = "arn:aws:s3:::${local.site_bucket}"
+        Condition = {
+          StringLike = { "s3:prefix" = ["${env}/*", "${env}/"] }
+        }
+      },
+      {
+        Sid      = "SiteWrite"
+        Effect   = "Allow"
+        Action   = ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"]
+        Resource = "arn:aws:s3:::${local.site_bucket}/${env}/*"
+      },
+      {
+        # CloudFront のディストリビューションは infra/ で作るので、ID はここでは決まっていない（アカウントに1つの想定）
+        Sid      = "Invalidate"
+        Effect   = "Allow"
+        Action   = ["cloudfront:CreateInvalidation", "cloudfront:GetInvalidation"]
+        Resource = "arn:aws:cloudfront::${local.account_id}:distribution/*"
+      },
+    ]
+  }
+
+  # ロールごとの権限ポリシー（whoami には付けない）
+  gha_policies = {
+    deploy = local.deploy_statements["dev"]
   }
 }
 
@@ -31,6 +94,16 @@ resource "aws_iam_role" "gha" {
         }
       }
     }]
+  })
+}
+
+resource "aws_iam_role_policy" "gha" {
+  for_each = local.gha_policies
+  name     = "${var.project}-${each.key}"
+  role     = aws_iam_role.gha[each.key].id
+  policy = jsonencode({
+    Version   = "2012-10-17"
+    Statement = each.value
   })
 }
 
