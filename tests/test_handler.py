@@ -22,6 +22,7 @@ def test_APIで単位と多めの金額を指定する():
     assert status == 200
     assert body["member"] == 2200
     assert body["organizer"] == 3400
+    assert body["unit"] == 100
 
 
 def test_APIで人数が無いと400():
