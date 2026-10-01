@@ -1,0 +1,163 @@
+name: terraform
+
+# infra/ の変更を、PR で plan → レビュー → マージ → 直前の plan を見て承認 → apply の順に届ける
+on:
+  pull_request:
+    paths:
+      - "infra/**"
+      - ".github/workflows/terraform.yml"
+  push:
+    branches: [main]
+    paths:
+      - "infra/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  TF_IN_AUTOMATION: "true"
+  TF_VAR_region: ${{ vars.AWS_REGION }}
+  TF_VERSION: "1.16.4"
+
+jobs:
+  # ---- PR：書式・書き方・plan を確かめ、結果を PR にコメントする（読み取りだけのロール）
+  plan:
+    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      id-token: write
+      contents: read
+      pull-requests: write # plan の要約を PR にコメントする
+    defaults:
+      run:
+        working-directory: infra
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: AWS のロールを借りる（plan 用・読み取りだけ）
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ vars.PLAN_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+          allowed-account-ids: ${{ vars.AWS_ACCOUNT_ID }}
+          role-session-name: gha-${{ github.run_id }}-plan
+
+      - uses: hashicorp/setup-terraform@v4
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - name: 書式を確かめる（fmt）
+        run: terraform fmt -check -recursive
+
+      - name: 初期化（init）
+        run: terraform init -input=false -backend-config="bucket=${{ vars.TFSTATE_BUCKET }}" -backend-config="region=${{ vars.AWS_REGION }}"
+
+      - name: 書き方を確かめる（validate）
+        run: terraform validate -no-color
+
+      - name: plan
+        id: plan
+        run: |
+          terraform plan -input=false -no-color -lock-timeout=5m | tee plan.txt
+          SUMMARY=$(grep -E '^(Plan:|No changes\.)' plan.txt | head -1)
+          echo "summary=${SUMMARY:-plan の要約が見つかりません}" >> "$GITHUB_OUTPUT"
+
+      - name: plan をまとめのページに出す
+        run: |
+          {
+            echo "### terraform plan（infra/）"
+            echo "**${{ steps.plan.outputs.summary }}**"
+            echo '<details><summary>plan の全文</summary>'
+            echo
+            echo '```'
+            cat plan.txt
+            echo '```'
+            echo '</details>'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: plan の要約を PR にコメントする
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          SUMMARY: ${{ steps.plan.outputs.summary }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          gh pr comment "$PR_NUMBER" --body "#### terraform plan（infra/）
+          **$SUMMARY**
+          全文は [実行のまとめのページ]($RUN_URL) を見てください。「destroy」や「replace」が含まれていないかを必ず確かめてから承認してください。"
+
+  # ---- main：apply の直前に plan を出し直す（承認する人はこれを見てから承認する）
+  plan-main:
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      id-token: write
+      contents: read
+    defaults:
+      run:
+        working-directory: infra
+    outputs:
+      summary: ${{ steps.plan.outputs.summary }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ vars.PLAN_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+          allowed-account-ids: ${{ vars.AWS_ACCOUNT_ID }}
+          role-session-name: gha-${{ github.run_id }}-plan-main
+      - uses: hashicorp/setup-terraform@v4
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+      - run: terraform init -input=false -backend-config="bucket=${{ vars.TFSTATE_BUCKET }}" -backend-config="region=${{ vars.AWS_REGION }}"
+      - name: plan（apply の直前）
+        id: plan
+        run: |
+          terraform plan -input=false -no-color -lock-timeout=5m | tee plan.txt
+          SUMMARY=$(grep -E '^(Plan:|No changes\.)' plan.txt | head -1)
+          echo "summary=${SUMMARY:-plan の要約が見つかりません}" >> "$GITHUB_OUTPUT"
+          {
+            echo "### apply の前の plan（これを見てから承認する）"
+            echo "**$SUMMARY**"
+            echo '```'
+            cat plan.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ---- 承認されたら apply（書き込みのロール。環境 infra を指定したジョブだけが借りられる）
+  apply:
+    needs: plan-main
+    if: needs.plan-main.outputs.summary != 'No changes. Your infrastructure matches the configuration.'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    environment: infra # 承認されるまで始まらない
+    concurrency:
+      group: terraform-infra # apply は1つずつ（途中のものは取り消さずに待たせる）
+      cancel-in-progress: false
+    permissions:
+      id-token: write
+      contents: read
+    defaults:
+      run:
+        working-directory: infra
+    steps:
+      - uses: actions/checkout@v7
+      - uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ vars.APPLY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+          allowed-account-ids: ${{ vars.AWS_ACCOUNT_ID }}
+          role-session-name: gha-${{ github.run_id }}-apply
+          role-duration-seconds: 3600 # CloudFront の変更は時間がかかることがあるので長めに
+      - uses: hashicorp/setup-terraform@v4
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+      - run: terraform init -input=false -backend-config="bucket=${{ vars.TFSTATE_BUCKET }}" -backend-config="region=${{ vars.AWS_REGION }}"
+      - name: apply
+        run: terraform apply -input=false -no-color -auto-approve -lock-timeout=10m
