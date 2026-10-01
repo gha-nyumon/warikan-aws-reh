@@ -20,6 +20,16 @@ locals {
       subs        = ["${local.repo_sub}:environment:prod"]
       max_session = 3600
     }
+    # infra/ の plan。自分のリポジトリの PR と、main ブランチ（apply の直前の plan・毎日のドリフトの確認）から借りられる。読み取りだけ
+    tf-plan = {
+      subs        = ["${local.repo_sub}:pull_request", "${local.repo_sub}:ref:refs/heads/main"]
+      max_session = 3600
+    }
+    # infra/ の apply。環境 infra（承認が必要）を指定したジョブだけが借りられる。時間がかかるので長めに借りられるようにする
+    tf-apply = {
+      subs        = ["${local.repo_sub}:environment:infra"]
+      max_session = 7200
+    }
   }
 
   # infra/ で作るものの名前（infra/ と同じ決まり）
@@ -75,10 +85,99 @@ locals {
     ]
   }
 
+  tfstate_bucket = "${var.project}-tfstate-${local.account_id}"
+
+  # plan：今の状態を読むだけ。ただし state のロックファイルだけは作って消せる
+  tf_plan_statements = [
+    {
+      Sid    = "ReadInfra"
+      Effect = "Allow"
+      Action = [
+        "lambda:Get*", "lambda:List*",
+        "cloudfront:Get*", "cloudfront:List*",
+        "logs:Describe*", "logs:List*",
+      ]
+      Resource = "*"
+    },
+    {
+      Sid      = "ReadLambdaRole"
+      Effect   = "Allow"
+      Action   = ["iam:GetRole", "iam:ListRolePolicies", "iam:ListAttachedRolePolicies", "iam:GetRolePolicy"]
+      Resource = "arn:aws:iam::${local.account_id}:role/${var.project}-lambda"
+    },
+    {
+      Sid      = "ReadBuckets"
+      Effect   = "Allow"
+      Action   = ["s3:Get*", "s3:List*"]
+      Resource = ["arn:aws:s3:::${local.site_bucket}", "arn:aws:s3:::${local.tfstate_bucket}", "arn:aws:s3:::${local.tfstate_bucket}/*"]
+    },
+    {
+      Sid      = "StateLockFile"
+      Effect   = "Allow"
+      Action   = ["s3:PutObject", "s3:DeleteObject"]
+      Resource = "arn:aws:s3:::${local.tfstate_bucket}/infra/terraform.tfstate.tflock"
+    },
+  ]
+
+  # apply：infra/ で作るものだけを作り変えられる
+  tf_apply_statements = [
+    {
+      Sid      = "ManageLambda"
+      Effect   = "Allow"
+      Action   = ["lambda:*"]
+      Resource = ["${local.function_arn}", "${local.function_arn}:*"]
+    },
+    {
+      Sid      = "ListLambda"
+      Effect   = "Allow"
+      Action   = ["lambda:List*", "lambda:GetAccountSettings"]
+      Resource = "*"
+    },
+    {
+      Sid      = "ManageLambdaRole"
+      Effect   = "Allow"
+      Action   = ["iam:*Role", "iam:*RolePolic*", "iam:TagRole", "iam:UntagRole", "iam:ListInstanceProfilesForRole", "iam:PassRole"]
+      Resource = "arn:aws:iam::${local.account_id}:role/${var.project}-lambda"
+    },
+    {
+      Sid      = "ManageLogs"
+      Effect   = "Allow"
+      Action   = ["logs:*"]
+      Resource = ["arn:aws:logs:${var.region}:${local.account_id}:log-group:/aws/lambda/${var.project}", "arn:aws:logs:${var.region}:${local.account_id}:log-group:/aws/lambda/${var.project}:*"]
+    },
+    {
+      Sid      = "DescribeLogs"
+      Effect   = "Allow"
+      Action   = ["logs:Describe*", "logs:List*"]
+      Resource = "*"
+    },
+    {
+      Sid      = "ManageSiteBucket"
+      Effect   = "Allow"
+      Action   = ["s3:*"]
+      Resource = ["arn:aws:s3:::${local.site_bucket}", "arn:aws:s3:::${local.site_bucket}/*"]
+    },
+    {
+      Sid      = "State"
+      Effect   = "Allow"
+      Action   = ["s3:ListBucket", "s3:GetObject", "s3:PutObject", "s3:DeleteObject"]
+      Resource = ["arn:aws:s3:::${local.tfstate_bucket}", "arn:aws:s3:::${local.tfstate_bucket}/infra/*"]
+    },
+    {
+      # ディストリビューション・OAC・キャッシュポリシーの ID は作るまで決まらない
+      Sid      = "ManageCloudFront"
+      Effect   = "Allow"
+      Action   = ["cloudfront:*"]
+      Resource = "*"
+    },
+  ]
+
   # ロールごとの権限ポリシー（whoami には付けない）
   gha_policies = {
     deploy-dev  = local.deploy_statements["dev"]
     deploy-prod = local.deploy_statements["prod"]
+    tf-plan     = local.tf_plan_statements
+    tf-apply    = local.tf_apply_statements
   }
 }
 
