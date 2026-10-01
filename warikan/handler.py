@@ -48,10 +48,6 @@ def handler(event: dict, context: object) -> dict:
     except ValueError as e:
         return _response(400, {"error": str(e)})
 
-    note_needed = "unit" in params
-    if note_needed and "extra" in params:
-        note = f"{unit}円単位・幹事が{extra}円多め"
-
     return _response(
         200,
         {
@@ -61,8 +57,5 @@ def handler(event: dict, context: object) -> dict:
             "total": share.total,
             "unit": unit,
             "version": os.environ.get("AWS_LAMBDA_FUNCTION_VERSION", "local"),
-            # わざと入れた誤り: unit だけを指定すると note が未定義で落ちる
-            # （テストは「両方を指定」「どちらも無し」だけ）
-            **({"note": note} if note_needed else {}),
         },
     )
