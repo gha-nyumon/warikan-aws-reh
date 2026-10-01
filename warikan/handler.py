@@ -5,7 +5,7 @@
     https://<関数URL>/?total=10000&people=3&unit=100&extra=1000
 
 返す値（JSON）:
-    {"member": 3333, "organizer": 3334, "people": 3, "total": 10000, "version": "5"}
+    {"member": 3333, "organizer": 3334, "people": 3, "total": 10000, "unit": 1, "version": "5"}
     member は幹事以外の1人が払う金額、organizer は幹事が払う金額、
     version は答えた Lambda のバージョン。
 """
@@ -55,6 +55,7 @@ def handler(event: dict, context: object) -> dict:
             "organizer": share.organizer,
             "people": share.people,
             "total": share.total,
+            "unit": unit,
             "version": os.environ.get("AWS_LAMBDA_FUNCTION_VERSION", "local"),
         },
     )
