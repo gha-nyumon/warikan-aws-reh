@@ -24,5 +24,5 @@ variable "lambda_memory_size" {
 variable "log_retention_days" {
   description = "Lambda のログを残す日数"
   type        = number
-  default     = 7
+  default     = 14
 }
