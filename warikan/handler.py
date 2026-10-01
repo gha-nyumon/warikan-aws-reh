@@ -48,15 +48,10 @@ def handler(event: dict, context: object) -> dict:
     except ValueError as e:
         return _response(400, {"error": str(e)})
 
-    member = share.member
-    # わざと入れた誤り: 11人以上だと幹事以外が0円になる（テストもスモークテストも試さない人数）
-    if people >= 11:
-        member = 0
-
     return _response(
         200,
         {
-            "member": member,
+            "member": share.member,
             "organizer": share.organizer,
             "people": share.people,
             "total": share.total,
