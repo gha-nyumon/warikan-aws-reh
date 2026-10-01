@@ -1,0 +1,93 @@
+name: _deploy
+
+# 1つの環境（dev または prod）に届ける部品（deploy.yml から呼ぶ）
+# 環境ごとに違う値（借りるロール・エイリアス・早見表のフォルダ・URL）は、GitHub の環境の変数に登録する
+on:
+  workflow_call:
+    inputs:
+      environment:
+        type: string
+        required: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment:
+      name: ${{ inputs.environment }} # sub に環境の名前が入る。prod は承認されるまで始まらない
+      url: ${{ vars.SITE_URL }}
+    concurrency:
+      group: deploy-${{ inputs.environment }} # 同じ環境へのデプロイは1つずつ
+      cancel-in-progress: false
+    env:
+      FUNCTION_NAME: ${{ vars.FUNCTION_NAME }}
+      FUNCTION_ALIAS: ${{ vars.FUNCTION_ALIAS }}
+      SITE_BUCKET: ${{ vars.SITE_BUCKET }}
+      SITE_PREFIX: ${{ vars.SITE_PREFIX }}
+      DISTRIBUTION_ID: ${{ vars.DISTRIBUTION_ID }}
+      API_URL: ${{ vars.API_URL }}
+      SITE_URL: ${{ vars.SITE_URL }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+
+      - name: 変数を確かめる（空ならここで止める）
+        run: |
+          for v in FUNCTION_NAME FUNCTION_ALIAS SITE_BUCKET SITE_PREFIX DISTRIBUTION_ID API_URL SITE_URL; do
+            if [ -z "${!v}" ]; then echo "::error::変数 $v が登録されていません（環境 ${{ inputs.environment }}）"; exit 1; fi
+          done
+
+      - name: AWS のロールを借りる（OIDC）
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+          allowed-account-ids: ${{ vars.AWS_ACCOUNT_ID }}
+          role-session-name: gha-${{ github.run_id }}-${{ github.run_attempt }}-${{ inputs.environment }}
+          role-duration-seconds: 900
+
+      # ---- Lambda：コードを上げる → バージョンを発行する → エイリアスを付け替える
+      - name: Lambda に上げる zip を作る
+        run: python scripts/package_lambda.py
+
+      - name: コードを上げて、バージョンを発行する
+        id: publish
+        run: |
+          aws lambda update-function-code --function-name "$FUNCTION_NAME" \
+            --zip-file fileb://dist/function.zip --query LastUpdateStatus --output text
+          aws lambda wait function-updated-v2 --function-name "$FUNCTION_NAME"
+          VERSION=$(aws lambda publish-version --function-name "$FUNCTION_NAME" \
+            --description "${GITHUB_SHA::7}" --query Version --output text)
+          echo "新しいバージョン: $VERSION"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: エイリアスを新しいバージョンに向ける
+        run: |
+          aws lambda update-alias --function-name "$FUNCTION_NAME" --name "$FUNCTION_ALIAS" \
+            --function-version "${{ steps.publish.outputs.version }}" --query FunctionVersion --output text
+
+      # ---- 早見表：ビルド → S3 に同期 → CloudFront のキャッシュを無効化
+      - name: 早見表をビルドする
+        run: python scripts/build_site.py
+
+      - name: 早見表を S3 に同期する
+        run: aws s3 sync site/ "s3://$SITE_BUCKET/$SITE_PREFIX/" --delete
+
+      - name: キャッシュを無効化する
+        run: |
+          ID=$(aws cloudfront create-invalidation --distribution-id "$DISTRIBUTION_ID" \
+            --paths "/$SITE_PREFIX/*" --query Invalidation.Id --output text)
+          aws cloudfront wait invalidation-completed --distribution-id "$DISTRIBUTION_ID" --id "$ID"
+
+      # ---- スモークテスト
+      - name: スモークテスト
+        run: |
+          curl -fsS "$API_URL?total=9000&people=3" | tee api.json
+          echo
+          grep -q '"member": 3000' api.json
+          grep -q "\"version\": \"${{ steps.publish.outputs.version }}\"" api.json
+          curl -fsS "$SITE_URL" | grep -q "割り勘の早見表"
+          echo "${{ inputs.environment }}：API（バージョン ${{ steps.publish.outputs.version }}）と早見表を確かめました" >> "$GITHUB_STEP_SUMMARY"
+          echo "::notice title=デプロイ::${{ inputs.environment }} にバージョン ${{ steps.publish.outputs.version }} を届けました"
