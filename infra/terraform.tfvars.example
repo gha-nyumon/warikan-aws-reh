@@ -1,0 +1,2 @@
+# このファイルを terraform.tfvars という名前でコピーし、自分の値に書き換えてから apply する
+region = "ap-northeast-1" # bootstrap/ と同じリージョン
